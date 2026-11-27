@@ -1,0 +1,13 @@
+# Build outputs & generated Xcode project
+build/
+*.xcodeproj/
+*.xcresult/
+DerivedData*/
+
+# Prebuilt dependency fetched by scripts/setup-deps.sh
+IDevice.xcframework/
+
+# macOS / Xcode user state
+.DS_Store
+xcuserdata/
+*.xcuserstate
