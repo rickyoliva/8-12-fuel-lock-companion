@@ -23,6 +23,8 @@ final class LocationSpoofManager: ObservableObject {
     @Published private(set) var pairingFileKind: PairingFileKind?
     @Published private(set) var vpnConnected = false
     @Published private(set) var localDevVPNInstalled = false
+    @Published private(set) var pairingState: PairingController.PairingState = .idle
+    @Published private(set) var pairingPIN: String?
     @Published private(set) var logs: [String] = []
     @Published var errorMessage: String?
     @Published var statusMessage: String?
@@ -42,10 +44,27 @@ final class LocationSpoofManager: ObservableObject {
     private lazy var keepAlive = KeepAlive { [weak self] msg in
         Task { @MainActor in self?.appendLog(msg) }
     }
+    private lazy var pairingController: PairingController = {
+        let controller = PairingController(
+            documentsDirectoryProvider: { Self.documentsDirectory },
+            logHandler: { [weak self] msg in
+                self?.appendLog(msg)
+            },
+            onPaired: { [weak self] _ in
+                guard let self else { return }
+                self.connection.disconnect()
+                self.refreshPairingFile()
+            }
+        )
+        return controller
+    }()
+    private var pairingStateObservation: Task<Void, Never>?
     private var resendTimer: Timer?
     private static let resendInterval: TimeInterval = 4.0
     private static let deviceIPKey = "deviceIP"
 
+    nonisolated static var deviceCanSelfPair: Bool { PairingController.deviceCanSelfPair }
+    var isSelfPairing: Bool { pairingState.isActive }
     var isSpoofing: Bool { simulatedCoordinate != nil }
     var isReadyToSpoof: Bool { pairingFileExists && vpnConnected }
     var isLocalDevVPNDetected: Bool { localDevVPNInstalled || vpnConnected }
@@ -138,6 +157,39 @@ final class LocationSpoofManager: ObservableObject {
         refreshPairingFile()
         statusMessage = "Pairing file removed."
         appendLog("Pairing file removed.")
+    }
+
+    // MARK: - On-Device Self-Pairing (iOS 27+)
+
+    func startSelfPairing() {
+        guard !isSelfPairing else { return }
+        errorMessage = nil
+        statusMessage = nil
+
+        if pairingStateObservation == nil {
+            pairingStateObservation = Task { [weak self] in
+                guard let self else { return }
+                for await newState in self.pairingController.$state.values {
+                    self.pairingState = newState
+                    self.pairingPIN = newState.activePIN
+                }
+            }
+        }
+
+        Task {
+            do {
+                let paired = try await pairingController.startAndWait()
+                statusMessage = "Paired \(paired.deviceName) and saved \(PairingFileStore.standardFilename)."
+            } catch is CancellationError {
+                statusMessage = "Self-pairing cancelled."
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func cancelSelfPairing() {
+        pairingController.cancel()
     }
 
     func openLocalDevVPN() {
@@ -364,7 +416,7 @@ final class LocationSpoofManager: ObservableObject {
         logs.joined(separator: "\n")
     }
 
-    static var documentsDirectory: URL {
+    nonisolated static var documentsDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL.documentsDirectory
     }

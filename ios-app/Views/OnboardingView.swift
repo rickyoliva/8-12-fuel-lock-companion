@@ -275,18 +275,24 @@ struct OnboardingView: View {
     // MARK: - Step 2: Pairing File
 
     private var pairingSubtitle: String {
-        if spoofManager.pairingFileExists {
-            return "Imported (\(PairingFileStore.standardFilename))"
+        if spoofManager.isSelfPairing {
+            return spoofManager.pairingState.statusText
+        } else if spoofManager.pairingFileExists {
+            return "Saved (\(PairingFileStore.standardFilename))"
         } else if state.pairingSkipped {
-            return "Skipped (can import later in Settings)"
+            return "Skipped (can configure later in Settings)"
         }
-        return "Import .plist or .mobiledevicepairing"
+        return LocationSpoofManager.deviceCanSelfPair
+            ? "Pair this iPhone or import a file"
+            : "Import .plist or .mobiledevicepairing"
     }
 
     private var pairingFileContent: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if spoofManager.pairingFileExists {
-                Label("Pairing file is imported and saved.", systemImage: "doc.badge.checkmark")
+            if spoofManager.isSelfPairing {
+                SelfPairingStatusCard()
+            } else if spoofManager.pairingFileExists {
+                Label("Pairing file is saved and ready.", systemImage: "doc.badge.checkmark")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.green)
 
@@ -297,6 +303,13 @@ struct OnboardingView: View {
                 }
 
                 HStack {
+                    if LocationSpoofManager.deviceCanSelfPair {
+                        Button("Re-pair") {
+                            spoofManager.startSelfPairing()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
                     Button("Replace File") {
                         showingFileImporter = true
                     }
@@ -311,12 +324,57 @@ struct OnboardingView: View {
                     }
                     .buttonStyle(.borderedProminent)
                 }
+            } else if LocationSpoofManager.deviceCanSelfPair {
+                Text("Pair this iPhone directly on-device (iOS 27+), or import a Remote Pairing file as fallback.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Text("1. Tap Pair This iPhone and allow Local Network access.\n2. Open Settings › Privacy & Security › Developer Mode.\n3. Tap Pair with 8/12 Fuel Lock and enter the 6-digit PIN.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                if let err = spoofManager.errorMessage {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                Button {
+                    spoofManager.startSelfPairing()
+                } label: {
+                    Label("Pair This iPhone", systemImage: "iphone.radiowaves.left.and.right")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+
+                HStack {
+                    Button {
+                        showingFileImporter = true
+                    } label: {
+                        Label("Import Pairing File", systemImage: "doc.badge.plus")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer()
+
+                    Button("Skip for now") {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            state.skipPairing()
+                            state.advance(vpnDetected: spoofManager.isLocalDevVPNDetected, pairingExists: false)
+                        }
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                }
             } else {
                 Text("Import your Remote Pairing file from SideInstaller, iLoader, or idevice_pair.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                Text("Tip: You can also use SideInstaller's \"Export pairing file\" → Share Sheet → \"Open in 8/12 Fuel Lock\", or drop pairingFile.plist into the Files app.")
+                Text("On-device self-pairing requires iOS 27+. On iOS 26.4–26.x, use SideInstaller's \"Export pairing file\" → Share Sheet → \"Open in 8/12 Fuel Lock\", or drop pairingFile.plist into the Files app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(10)

@@ -123,6 +123,76 @@ struct OnboardingAndPairingTests {
         #expect(state.expandedStep == .ready)
     }
 
+    // MARK: - Self-Pairing Capability, State Transitions & Persistence Tests
+
+    @Test func deviceCanSelfPairRequiresIOS27OrLater() {
+        #expect(PairingController.minimumSelfPairingOSMajorVersion == 27)
+        #expect(PairingController.canSelfPair(osVersion: OperatingSystemVersion(majorVersion: 26, minorVersion: 4, patchVersion: 0)) == false)
+        #expect(PairingController.canSelfPair(osVersion: OperatingSystemVersion(majorVersion: 26, minorVersion: 9, patchVersion: 1)) == false)
+        #expect(PairingController.canSelfPair(osVersion: OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)) == true)
+        #expect(PairingController.canSelfPair(osVersion: OperatingSystemVersion(majorVersion: 27, minorVersion: 2, patchVersion: 0)) == true)
+
+        let expectedRuntime = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27
+        #expect(PairingController.deviceCanSelfPair == expectedRuntime)
+        #expect(LocationSpoofManager.deviceCanSelfPair == expectedRuntime)
+    }
+
+    @Test @MainActor func pairingControllerStateTransitions() {
+        let controller = PairingController()
+        #expect(controller.state == .idle)
+        #expect(controller.state.isActive == false)
+        #expect(controller.state.activePIN == nil)
+
+        controller.applyEvent(.localNetworkRequested)
+        #expect(controller.state == .requestingLocalNetwork)
+        #expect(controller.state.isActive == true)
+
+        controller.applyEvent(.localNetworkGranted)
+        #expect(controller.state == .waitingForDevice)
+        #expect(controller.state.isActive == true)
+
+        controller.applyEvent(.advertisingStarted)
+        #expect(controller.state == .advertising)
+        #expect(controller.state.isActive == true)
+
+        controller.applyEvent(.pinReceived("482910"))
+        #expect(controller.state == .awaitingPIN("482910"))
+        #expect(controller.state.isActive == true)
+        #expect(controller.state.activePIN == "482910")
+
+        controller.applyEvent(.succeeded(deviceName: "iPhone", byteCount: 512))
+        #expect(controller.state == .paired(deviceName: "iPhone", byteCount: 512))
+        #expect(controller.state.isActive == false)
+        #expect(controller.state.activePIN == nil)
+
+        controller.applyEvent(.localNetworkDenied)
+        #expect(controller.state == .failed(PairingController.PairingError.localNetworkDenied.localizedDescription))
+        #expect(controller.state.isActive == false)
+
+        controller.applyEvent(.cancelled)
+        #expect(controller.state == .cancelled)
+        #expect(controller.state.isActive == false)
+
+        controller.applyEvent(.reset)
+        #expect(controller.state == .idle)
+    }
+
+    @Test func persistsGeneratedPairingFileToStandardDocumentsPath() throws {
+        let docsDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: docsDir) }
+
+        let stagedURL = docsDir.appendingPathComponent("staged-rppair.plist")
+        let payload = try sampleRemotePairingData()
+        try payload.write(to: stagedURL)
+
+        let standardURL = PairingFileStore.standardURL(in: docsDir)
+        let result = try PairingFileStore.importFile(from: stagedURL, to: standardURL)
+        #expect(result.kind.hasRemotePairing == true)
+        #expect(standardURL.lastPathComponent == "pairingFile.plist")
+        #expect(PairingFileStore.hasNonEmptyFile(at: standardURL) == true)
+        #expect(try Data(contentsOf: standardURL) == payload)
+    }
+
     // MARK: - Picker Options Tests
 
     @Test func fuelAndRegionPickerOptionsMatchExpectedOrder() {

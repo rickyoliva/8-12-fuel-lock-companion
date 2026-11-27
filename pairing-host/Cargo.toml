@@ -1,0 +1,22 @@
+[package]
+name = "pairing_host_ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal C FFI shim over idevice's RPPairing host for 8/12 Fuel Lock Companion"
+
+[lib]
+name = "pairing_host_ffi"
+crate-type = ["staticlib"]
+
+[dependencies]
+idevice = { path = "vendor/idevice", default-features = false, features = [
+  "aws-lc",
+  "remote_pairing",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "fs", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

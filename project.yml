@@ -24,6 +24,8 @@ targets:
     dependencies:
       - framework: IDevice.xcframework
         embed: false
+      - framework: PairingHost.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rickyoliva.fuellockcompanion
