@@ -739,6 +739,9 @@ name = "pairing_host_ffi"
 version = "0.1.0"
 dependencies = [
  "idevice",
+ "libc",
+ "plist",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

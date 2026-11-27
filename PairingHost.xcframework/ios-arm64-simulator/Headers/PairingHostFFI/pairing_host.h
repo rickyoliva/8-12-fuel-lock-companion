@@ -54,6 +54,17 @@ SIPairCancel *si_pairing_cancel_new(void);
 void si_pairing_cancel(const SIPairCancel *cancel);
 void si_pairing_cancel_free(SIPairCancel *cancel);
 
+// Pairing port probe and discovery (49152-65535)
+int32_t si_find_pairing_port(const char *device_ip,
+                             const uint16_t *tried,
+                             size_t tried_count,
+                             uint16_t *out_port,
+                             char **out_summary);
+
+int32_t si_probe_pairing_port(const char *device_ip,
+                              uint16_t port,
+                              char **out_summary);
+
 #ifdef __cplusplus
 }
 #endif

@@ -111,6 +111,12 @@ final class LocationSpoofManager: ObservableObject {
         return NetworkStatus.parseEndpoint(trimmed)
     }
 
+    var resolvedExplicitPort: UInt16? {
+        let trimmed = deviceIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return NetworkStatus.parseEndpointComponents(trimmed)?.explicitPort
+    }
+
     func refreshNetworkStatus() {
         guard let endpoint = resolvedEndpoint else {
             vpnConnected = false
@@ -278,9 +284,18 @@ final class LocationSpoofManager: ObservableObject {
 
         if !connection.isConnected {
             stage = .connecting
-            appendLog("Connecting to \(endpoint.host):\(endpoint.port) via LocalDevVPN…")
+            let explicitPort = resolvedExplicitPort
+            let targetLabel = explicitPort.map { "\(endpoint.host):\($0)" } ?? endpoint.host
+            appendLog("Connecting to \(targetLabel) via LocalDevVPN…")
             try await onDeviceQueue {
-                try self.connection.connect(deviceIP: endpoint.host, port: endpoint.port, pairingFilePath: pairingPath)
+                try self.connection.connect(
+                    deviceIP: endpoint.host,
+                    port: explicitPort,
+                    pairingFilePath: pairingPath,
+                    log: { [weak self] msg in
+                        Task { @MainActor in self?.appendLog(msg) }
+                    }
+                )
             }
             appendLog("Tunnel connected.")
         }
