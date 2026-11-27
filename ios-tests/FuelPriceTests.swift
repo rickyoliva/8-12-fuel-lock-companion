@@ -87,9 +87,65 @@ struct FuelPriceTests {
         #expect(e10[0].rank == 1)
     }
 
-    @Test func networkStatusHostStripsCIDRAndWhitespace() {
+    @Test func networkStatusHostStripsCIDRAndPortAndWhitespace() {
         #expect(NetworkStatus.host(" 10.7.0.1/32 ") == "10.7.0.1")
         #expect(NetworkStatus.host("10.7.0.1") == "10.7.0.1")
+        #expect(NetworkStatus.host("10.7.0.1:49152") == "10.7.0.1")
+        #expect(NetworkStatus.host(" 10.7.0.1/32:50000 ") == "10.7.0.1")
+        #expect(NetworkStatus.host("iphone.local:49152") == "iphone.local")
+    }
+
+    @Test func networkStatusParseEndpointDefaultsAndFormats() {
+        #expect(DeviceConnection.defaultDeviceIP == "10.7.0.1")
+        #expect(DeviceConnection.rsdPort == 49152)
+
+        // Default / LocalDevVPN CIDR format without port
+        #expect(
+            NetworkStatus.parseEndpoint("10.7.0.1/32")
+                == NetworkStatus.Endpoint(host: "10.7.0.1", port: 49152)
+        )
+        #expect(
+            NetworkStatus.parseEndpoint(" 10.7.0.1 ")
+                == NetworkStatus.Endpoint(host: "10.7.0.1", port: 49152)
+        )
+
+        // Host without port defaults to rsdPort
+        #expect(
+            NetworkStatus.parseEndpoint("iphone.local")
+                == NetworkStatus.Endpoint(host: "iphone.local", port: 49152)
+        )
+
+        // host:port parsing
+        #expect(
+            NetworkStatus.parseEndpoint("10.7.0.1:49152")
+                == NetworkStatus.Endpoint(host: "10.7.0.1", port: 49152)
+        )
+        #expect(
+            NetworkStatus.parseEndpoint("10.7.0.1:50000")
+                == NetworkStatus.Endpoint(host: "10.7.0.1", port: 50000)
+        )
+        #expect(
+            NetworkStatus.parseEndpoint("10.7.0.1/32:50000")
+                == NetworkStatus.Endpoint(host: "10.7.0.1", port: 50000)
+        )
+        #expect(
+            NetworkStatus.parseEndpoint("iphone.local:12345")
+                == NetworkStatus.Endpoint(host: "iphone.local", port: 12345)
+        )
+        #expect(
+            NetworkStatus.parseEndpoint("[::1]:50000")
+                == NetworkStatus.Endpoint(host: "::1", port: 50000)
+        )
+
+        // Invalid / empty inputs
+        #expect(NetworkStatus.parseEndpoint("") == nil)
+        #expect(NetworkStatus.parseEndpoint("   ") == nil)
+        #expect(NetworkStatus.parseEndpoint("10.7.0.1:") == nil)
+        #expect(NetworkStatus.parseEndpoint("10.7.0.1:0") == nil)
+        #expect(NetworkStatus.parseEndpoint("10.7.0.1:65536") == nil)
+        #expect(NetworkStatus.parseEndpoint("10.7.0.1:abc") == nil)
+        #expect(NetworkStatus.parseEndpoint(":49152") == nil)
+        #expect(NetworkStatus.parseEndpoint("10.7.0.1/99") == nil)
     }
 
     @Test func networkStatusTunnelIsUpRules() {

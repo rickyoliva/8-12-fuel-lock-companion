@@ -29,6 +29,9 @@ final class LocationSpoofManager: ObservableObject {
     @Published var deviceIP: String {
         didSet {
             UserDefaults.standard.set(deviceIP, forKey: Self.deviceIPKey)
+            if oldValue != deviceIP && !isSpoofing {
+                connection.disconnect()
+            }
             refreshNetworkStatus()
         }
     }
@@ -64,9 +67,25 @@ final class LocationSpoofManager: ObservableObject {
         pairingFileKind = pairingFileExists ? PairingFileKind.of(path: path) : nil
     }
 
+    var isDeviceEndpointValid: Bool {
+        let trimmed = deviceIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || NetworkStatus.parseEndpoint(trimmed) != nil
+    }
+
+    var resolvedEndpoint: NetworkStatus.Endpoint? {
+        let trimmed = deviceIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return NetworkStatus.Endpoint(host: DeviceConnection.defaultDeviceIP, port: DeviceConnection.rsdPort)
+        }
+        return NetworkStatus.parseEndpoint(trimmed)
+    }
+
     func refreshNetworkStatus() {
-        let ip = NetworkStatus.host(deviceIP)
-        vpnConnected = NetworkStatus.loopbackTunnelUp(deviceIP: ip.isEmpty ? DeviceConnection.defaultDeviceIP : ip)
+        guard let endpoint = resolvedEndpoint else {
+            vpnConnected = false
+            return
+        }
+        vpnConnected = NetworkStatus.loopbackTunnelUp(deviceIP: endpoint.host)
     }
 
     // MARK: - Pairing File Import
@@ -192,14 +211,18 @@ final class LocationSpoofManager: ObservableObject {
     }
 
     private func ensureReadyAndSpoof(coordinate: CLLocationCoordinate2D, station: FuelStation) async throws {
-        let targetIP = NetworkStatus.host(deviceIP).isEmpty ? DeviceConnection.defaultDeviceIP : NetworkStatus.host(deviceIP)
+        guard let endpoint = resolvedEndpoint else {
+            throw DeviceConnection.DeviceError.message(
+                "Invalid device endpoint: \(deviceIP). Enter an IP or host:port (e.g. 10.7.0.1 or 10.7.0.1:49152)."
+            )
+        }
         let pairingPath = Self.pairingFileURL.path
 
         if !connection.isConnected {
             stage = .connecting
-            appendLog("Connecting to \(targetIP):\(DeviceConnection.rsdPort) via LocalDevVPN…")
+            appendLog("Connecting to \(endpoint.host):\(endpoint.port) via LocalDevVPN…")
             try await onDeviceQueue {
-                try self.connection.connect(deviceIP: targetIP, pairingFilePath: pairingPath)
+                try self.connection.connect(deviceIP: endpoint.host, port: endpoint.port, pairingFilePath: pairingPath)
             }
             appendLog("Tunnel connected.")
         }

@@ -56,7 +56,23 @@ final class DeviceConnection {
 
     // MARK: - Tunnel Connection
 
-    func connect(deviceIP: String, pairingFilePath: String, hostname: String = "FuelLockCompanion") throws {
+    func connect(
+        deviceIP: String,
+        port: UInt16? = nil,
+        pairingFilePath: String,
+        hostname: String = "FuelLockCompanion"
+    ) throws {
+        let fallbackPort = port ?? Self.rsdPort
+        let trimmed = deviceIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpoint: NetworkStatus.Endpoint
+        if trimmed.isEmpty {
+            endpoint = NetworkStatus.Endpoint(host: Self.defaultDeviceIP, port: fallbackPort)
+        } else if let parsed = NetworkStatus.parseEndpoint(trimmed, defaultPort: fallbackPort) {
+            endpoint = parsed
+        } else {
+            throw DeviceError.message("Invalid device endpoint: \(deviceIP)")
+        }
+
         let kind = PairingFileKind.of(path: pairingFilePath)
         guard kind.isUsable else {
             throw DeviceError.message(
@@ -78,13 +94,7 @@ final class DeviceConnection {
         }
         defer { rp_pairing_file_free(pairingFile) }
 
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = Self.rsdPort.bigEndian
-        guard deviceIP.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 else {
-            throw DeviceError.message("Invalid device IP: \(deviceIP)")
-        }
+        var addr = try Self.resolveIPv4Address(host: endpoint.host, port: endpoint.port)
 
         var newAdapter: OpaquePointer?
         var newHandshake: OpaquePointer?
@@ -106,7 +116,7 @@ final class DeviceConnection {
         }
         try check(
             err,
-            "Couldn't open tunnel to \(deviceIP):\(Self.rsdPort). Make sure LocalDevVPN is connected, Wi-Fi is on, and Developer Mode is enabled."
+            "Couldn't open tunnel to \(endpoint.host):\(endpoint.port). Make sure LocalDevVPN is connected, Wi-Fi is on, and Developer Mode is enabled."
         )
         guard let newAdapter, let newHandshake else {
             throw DeviceError.message("Tunnel opened without valid adapter/handshake handles.")
@@ -115,6 +125,35 @@ final class DeviceConnection {
         disconnect()
         self.adapter = newAdapter
         self.handshake = newHandshake
+    }
+
+    private static func resolveIPv4Address(host: String, port: UInt16) throws -> sockaddr_in {
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        if host.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 {
+            return addr
+        }
+
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = host.withCString { getaddrinfo($0, nil, &hints, &result) }
+        defer { if let result { freeaddrinfo(result) } }
+        guard status == 0,
+              let resolved = result,
+              let aiAddr = resolved.pointee.ai_addr,
+              resolved.pointee.ai_addrlen >= MemoryLayout<sockaddr_in>.size
+        else {
+            throw DeviceError.message("Invalid device IP or host: \(host)")
+        }
+
+        var resolvedAddr = aiAddr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+        resolvedAddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        resolvedAddr.sin_port = port.bigEndian
+        return resolvedAddr
     }
 
     // MARK: - Developer Disk Image (Cryptex for iOS 26.4+ & Personalized Fallback)

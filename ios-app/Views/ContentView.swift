@@ -250,7 +250,7 @@ struct ContentView: View {
                         Text("LocalDevVPN Tunnel")
                             .font(.subheadline.weight(.semibold))
                         Text(spoofManager.vpnConnected
-                             ? "Connected (\(spoofManager.deviceIP))"
+                             ? "Connected (\(spoofManager.resolvedEndpoint?.host ?? DeviceConnection.defaultDeviceIP))"
                              : "Turn on LocalDevVPN so 8/12 can simulate GPS.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -269,15 +269,23 @@ struct ContentView: View {
                     .controlSize(.small)
                 }
 
-                HStack {
-                    Text("Device IP")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextField("10.7.0.1", text: $spoofManager.deviceIP)
-                        .font(.caption.monospaced())
-                        .textFieldStyle(.roundedBorder)
-                        .keyboardType(.decimalPad)
-                        .autocorrectionDisabled()
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Device IP")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("10.7.0.1 (or host:port)", text: $spoofManager.deviceIP)
+                            .font(.caption.monospaced())
+                            .textFieldStyle(.roundedBorder)
+                            .keyboardType(.numbersAndPunctuation)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    if !spoofManager.isDeviceEndpointValid {
+                        Text("Enter an IP or host:port (e.g. 10.7.0.1 or 10.7.0.1:49152).")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
                 }
             }
         }

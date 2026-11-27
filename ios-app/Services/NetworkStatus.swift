@@ -26,6 +26,11 @@ enum NetworkStatus {
         var answered: Bool { self == .connected || self == .refused }
     }
 
+    struct Endpoint: Equatable {
+        let host: String
+        let port: UInt16
+    }
+
     struct ProbeTarget: Equatable {
         let deviceIP: String
         let interface: String
@@ -94,9 +99,78 @@ enum NetworkStatus {
     }
 
     static func host(_ value: String) -> String {
+        if let parsed = parseEndpoint(value) {
+            return parsed.host
+        }
+        return stripPortAndCIDR(value)
+    }
+
+    /// Parses an endpoint string such as `10.7.0.1`, `10.7.0.1/32`, `10.7.0.1:49152`,
+    /// or `host:port`. Returns `nil` for empty or malformed inputs.
+    static func parseEndpoint(
+        _ value: String,
+        defaultPort: UInt16 = DeviceConnection.rsdPort
+    ) -> Endpoint? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let slash = trimmed.firstIndex(of: "/") else { return trimmed }
-        return String(trimmed[..<slash]).trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+
+        let hostAndCIDR: String
+        let port: UInt16
+
+        if trimmed.hasPrefix("[") {
+            guard let closeBracket = trimmed.firstIndex(of: "]") else { return nil }
+            hostAndCIDR = String(trimmed[trimmed.index(after: trimmed.startIndex)..<closeBracket])
+                .trimmingCharacters(in: .whitespaces)
+            let remainder = trimmed[trimmed.index(after: closeBracket)...]
+            if remainder.isEmpty {
+                port = defaultPort
+            } else if remainder.hasPrefix(":") {
+                guard let parsedPort = parsePort(String(remainder.dropFirst())) else { return nil }
+                port = parsedPort
+            } else {
+                return nil
+            }
+        } else if let colon = trimmed.firstIndex(of: ":"), colon == trimmed.lastIndex(of: ":") {
+            hostAndCIDR = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
+            let portString = String(trimmed[trimmed.index(after: colon)...])
+            guard let parsedPort = parsePort(portString) else { return nil }
+            port = parsedPort
+        } else {
+            hostAndCIDR = trimmed
+            port = defaultPort
+        }
+
+        let host: String
+        if let slash = hostAndCIDR.firstIndex(of: "/") {
+            let prefixString = String(hostAndCIDR[hostAndCIDR.index(after: slash)...])
+                .trimmingCharacters(in: .whitespaces)
+            guard let prefix = Int(prefixString), (0...32).contains(prefix) else { return nil }
+            host = String(hostAndCIDR[..<slash]).trimmingCharacters(in: .whitespaces)
+        } else {
+            host = hostAndCIDR
+        }
+
+        guard !host.isEmpty, !host.contains(where: \.isWhitespace) else { return nil }
+        return Endpoint(host: host, port: port)
+    }
+
+    private static func parsePort(_ raw: String) -> UInt16? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed.allSatisfy(\.isASCII), trimmed.allSatisfy(\.isNumber),
+              let port = UInt16(trimmed), port > 0
+        else { return nil }
+        return port
+    }
+
+    private static func stripPortAndCIDR(_ value: String) -> String {
+        var result = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let colon = result.firstIndex(of: ":"), colon == result.lastIndex(of: ":") {
+            result = String(result[..<colon]).trimmingCharacters(in: .whitespaces)
+        }
+        if let slash = result.firstIndex(of: "/") {
+            result = String(result[..<slash]).trimmingCharacters(in: .whitespaces)
+        }
+        return result
     }
 
     static func isOwnAddress(_ deviceIP: String) -> Bool {
