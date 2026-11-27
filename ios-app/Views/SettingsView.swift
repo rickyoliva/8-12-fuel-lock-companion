@@ -121,6 +121,21 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if spoofManager.isSelfPairing {
+                SelfPairingStatusCard()
+                    .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+            } else if LocationSpoofManager.deviceCanSelfPair {
+                Button {
+                    spoofManager.startSelfPairing()
+                } label: {
+                    Label(
+                        spoofManager.pairingFileExists ? "Re-pair This iPhone" : "Pair This iPhone",
+                        systemImage: "iphone.radiowaves.left.and.right"
+                    )
+                    .fontWeight(.semibold)
+                }
+            }
+
             Button {
                 showingFileImporter = true
             } label: {
@@ -141,7 +156,11 @@ struct SettingsView: View {
         } header: {
             Text("Pairing File")
         } footer: {
-            Text("Stored at Documents/\(PairingFileStore.standardFilename). You can also share a .plist or .mobiledevicepairing file into 8/12 via the Share Sheet or Files app.")
+            if LocationSpoofManager.deviceCanSelfPair {
+                Text("Stored at Documents/\(PairingFileStore.standardFilename). Tap Pair This iPhone to pair on-device via Settings › Privacy & Security › Developer Mode, or import a .plist / .mobiledevicepairing file as fallback.")
+            } else {
+                Text("Stored at Documents/\(PairingFileStore.standardFilename). On-device self-pairing requires iOS 27+. On iOS 26.4–26.x, import a .plist or .mobiledevicepairing file via the Share Sheet or Files app.")
+            }
         }
     }
 

@@ -7,6 +7,9 @@ DerivedData*/
 # Prebuilt dependency fetched by scripts/setup-deps.sh
 IDevice.xcframework/
 
+# Rust build artifacts (PairingHost.xcframework is vendored; rebuild with scripts/build-rust.sh)
+pairing-host/target/
+
 # macOS / Xcode user state
 .DS_Store
 xcuserdata/

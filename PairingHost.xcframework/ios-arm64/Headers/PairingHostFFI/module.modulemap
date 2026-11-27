@@ -1,0 +1,4 @@
+module PairingHostFFI {
+    header "pairing_host.h"
+    export *
+}
