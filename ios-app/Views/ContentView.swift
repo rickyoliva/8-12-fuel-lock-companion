@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var fuelService: FuelPriceService
@@ -9,9 +8,14 @@ struct ContentView: View {
     @AppStorage("defaultFuelType") private var selectedFuelTypeRaw: String = FuelType.u91.rawValue
     @AppStorage("defaultFuelRegion") private var selectedRegionRaw: String = FuelRegion.all.rawValue
 
-    @State private var showingFileImporter = false
-    @State private var showingLogSheet = false
-    @State private var setupExpanded = true
+    @State private var guideExpanded = false
+    @State private var showingSettings = false
+    @State private var activePicker: ActivePicker?
+
+    enum ActivePicker {
+        case fuel
+        case region
+    }
 
     private var selectedFuelType: FuelType {
         FuelType(rawValue: selectedFuelTypeRaw) ?? .u91
@@ -27,34 +31,44 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    if spoofManager.isSpoofing || spoofManager.isBusy {
-                        activeSpoofBanner
-                    }
+            ZStack {
+                ScrollView {
+                    VStack(spacing: 18) {
+                        howToBanner
 
-                    if let error = spoofManager.errorMessage {
-                        feedbackBanner(text: error, isError: true) {
-                            spoofManager.errorMessage = nil
+                        if spoofManager.isSpoofing || spoofManager.isBusy {
+                            activeSpoofBanner
                         }
-                    } else if let status = spoofManager.statusMessage, !spoofManager.isSpoofing {
-                        feedbackBanner(text: status, isError: false) {
-                            spoofManager.statusMessage = nil
-                        }
-                    }
 
-                    setupCard
-                    fuelPricesSection
-                    fuelLockGuideCard
+                        if let error = spoofManager.errorMessage {
+                            feedbackBanner(text: error, isError: true) {
+                                spoofManager.errorMessage = nil
+                            }
+                        } else if let status = spoofManager.statusMessage, !spoofManager.isSpoofing {
+                            feedbackBanner(text: status, isError: false) {
+                                spoofManager.statusMessage = nil
+                            }
+                        }
+
+                        if !spoofManager.isReadyToSpoof {
+                            setupIncompleteBanner
+                        }
+
+                        fuelPricesSection
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .background(Color(.systemGroupedBackground))
+
+                if let activePicker {
+                    pickerOverlay(for: activePicker)
+                }
             }
-            .background(Color(.systemGroupedBackground))
             .navigationTitle("8/12 Fuel Lock")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 14) {
                         Button {
                             Task { await fuelService.refresh(force: true) }
                         } label: {
@@ -63,10 +77,11 @@ struct ContentView: View {
                         .disabled(fuelService.isLoading)
 
                         Button {
-                            showingLogSheet = true
+                            showingSettings = true
                         } label: {
-                            Image(systemName: "terminal")
+                            Image(systemName: "gearshape")
                         }
+                        .accessibilityLabel("Settings")
                     }
                 }
             }
@@ -76,9 +91,6 @@ struct ContentView: View {
             }
             .task {
                 spoofManager.refreshState()
-                if spoofManager.isReadyToSpoof {
-                    setupExpanded = false
-                }
                 await fuelService.refresh(force: false)
             }
             .onChange(of: scenePhase) { _, newPhase in
@@ -86,26 +98,126 @@ struct ContentView: View {
                     spoofManager.refreshState()
                 }
             }
-            .fileImporter(
-                isPresented: $showingFileImporter,
-                allowedContentTypes: [.data, .propertyList],
-                allowsMultipleSelection: false
-            ) { result in
-                switch result {
-                case .success(let urls):
-                    if let url = urls.first {
-                        spoofManager.importPairingFile(from: url)
-                        if spoofManager.isReadyToSpoof {
-                            setupExpanded = false
-                        }
-                    }
-                case .failure(let error):
-                    spoofManager.errorMessage = "File import failed: \(error.localizedDescription)"
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
+                    .environmentObject(spoofManager)
+            }
+        }
+    }
+
+    // MARK: - Collapsible "How to Fuel Lock with 8/12" Banner
+
+    private var howToBanner: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    guideExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "fuelpump.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 28, height: 28)
+                        .background(Color.accentColor.opacity(0.14), in: Circle())
+
+                    Text("How to Fuel Lock with 8/12")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Spacer()
+
+                    Image(systemName: guideExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
             }
-            .sheet(isPresented: $showingLogSheet) {
-                ActivityLogSheet(logs: spoofManager.logs)
+            .buttonStyle(.plain)
+
+            if guideExpanded {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    guideStep(
+                        number: 1,
+                        title: "Run Spoof",
+                        detail: "Tap \"Spoof Here\" on a cheap station below. Background keep-alive starts automatically."
+                    )
+                    guideStep(
+                        number: 2,
+                        title: "Start Fuel Lock & Wait for Price",
+                        detail: "Open the 7-Eleven app, start Fuel Lock, and wait until the spoofed price appears."
+                    )
+                    guideStep(
+                        number: 3,
+                        title: "Turn Off Spoof",
+                        detail: "Switch back to 8/12 and tap \"Stop Spoof\" to restore your real GPS location."
+                    )
+                    guideStep(
+                        number: 4,
+                        title: "Return & Claim",
+                        detail: "Switch back to the 7-Eleven app and claim your locked fuel price!"
+                    )
+                }
             }
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func guideStep(number: Int, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("\(number)")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(Color.accentColor, in: Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Setup Incomplete Banner
+
+    private var setupIncompleteBanner: some View {
+        Button {
+            showingSettings = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "wrench.and.screwdriver.fill")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(setupPromptTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text("Tap to configure in Settings")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var setupPromptTitle: String {
+        if !spoofManager.pairingFileExists && !spoofManager.vpnConnected {
+            return "Import pairing file & connect LocalDevVPN"
+        } else if !spoofManager.pairingFileExists {
+            return "Pairing file missing"
+        } else {
+            return "LocalDevVPN not connected"
         }
     }
 
@@ -182,121 +294,10 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Setup Card
-
-    private var setupCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    setupExpanded.toggle()
-                }
-            } label: {
-                HStack {
-                    Image(systemName: spoofManager.isReadyToSpoof ? "checkmark.seal.fill" : "wrench.and.screwdriver.fill")
-                        .foregroundStyle(spoofManager.isReadyToSpoof ? .green : .orange)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Spoofing Setup")
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                        Text(spoofManager.isReadyToSpoof
-                             ? "Pairing file & LocalDevVPN ready"
-                             : "Two quick steps before you can spoof")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: setupExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .buttonStyle(.plain)
-
-            if setupExpanded {
-                Divider()
-
-                // 1. Pairing File
-                HStack(alignment: .center, spacing: 12) {
-                    Image(systemName: spoofManager.pairingFileExists ? "checkmark.circle.fill" : "1.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(spoofManager.pairingFileExists ? .green : .accentColor)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Remote Pairing File")
-                            .font(.subheadline.weight(.semibold))
-                        Text(spoofManager.pairingFileExists
-                             ? "Imported — ready for iOS 26.4+ LocalDevVPN"
-                             : "Import a Remote Pairing file from idevice_pair, iLoader, or SideInstaller.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    Button(spoofManager.pairingFileExists ? "Replace" : "Import") {
-                        showingFileImporter = true
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-
-                // 2. LocalDevVPN
-                HStack(alignment: .center, spacing: 12) {
-                    Image(systemName: spoofManager.vpnConnected ? "checkmark.circle.fill" : "2.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(spoofManager.vpnConnected ? .green : .accentColor)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("LocalDevVPN Tunnel")
-                            .font(.subheadline.weight(.semibold))
-                        Text(spoofManager.vpnConnected
-                             ? "Connected (\(spoofManager.resolvedEndpoint?.host ?? DeviceConnection.defaultDeviceIP))"
-                             : "Turn on LocalDevVPN so 8/12 can simulate GPS.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    Button(spoofManager.vpnConnected ? "Refresh" : "Open VPN") {
-                        if spoofManager.vpnConnected {
-                            spoofManager.refreshNetworkStatus()
-                        } else {
-                            spoofManager.openLocalDevVPN()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Device IP")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        TextField("10.7.0.1 (or host:port)", text: $spoofManager.deviceIP)
-                            .font(.caption.monospaced())
-                            .textFieldStyle(.roundedBorder)
-                            .keyboardType(.numbersAndPunctuation)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    if !spoofManager.isDeviceEndpointValid {
-                        Text("Enter an IP or host:port (e.g. 10.7.0.1 or 10.7.0.1:49152).")
-                            .font(.caption2)
-                            .foregroundStyle(.red)
-                    }
-                }
-            }
-        }
-        .padding(16)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    // MARK: - Fuel Prices Section
+    // MARK: - Cheapest 7-Eleven Fuel Section
 
     private var fuelPricesSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Cheapest 7-Eleven Fuel")
                     .font(.headline)
@@ -311,37 +312,28 @@ struct ContentView: View {
                 }
             }
 
-            // Fuel Type Picker
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(FuelType.allCases) { fuel in
-                        Button {
-                            selectedFuelTypeRaw = fuel.rawValue
-                        } label: {
-                            Text(fuel.rawValue)
-                                .font(.subheadline.weight(.semibold))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 7)
-                                .background(
-                                    selectedFuelType == fuel
-                                        ? Color.accentColor
-                                        : Color(.tertiarySystemGroupedBackground),
-                                    in: Capsule()
-                                )
-                                .foregroundStyle(selectedFuelType == fuel ? .white : .primary)
-                        }
-                        .buttonStyle(.plain)
+            // Matching Fuel & State/Region selector pills
+            HStack(spacing: 12) {
+                SelectorPillButton(
+                    title: "Fuel",
+                    value: selectedFuelType.rawValue,
+                    icon: "drop.fill"
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        activePicker = .fuel
+                    }
+                }
+
+                SelectorPillButton(
+                    title: "State",
+                    value: selectedRegion.rawValue,
+                    icon: "mappin.and.ellipse"
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        activePicker = .region
                     }
                 }
             }
-
-            // Region Picker
-            Picker("Region", selection: $selectedRegionRaw) {
-                ForEach(FuelRegion.allCases) { region in
-                    Text(region.rawValue).tag(region.rawValue)
-                }
-            }
-            .pickerStyle(.segmented)
 
             if let error = fuelService.errorMessage {
                 Text(error)
@@ -350,7 +342,7 @@ struct ContentView: View {
             }
 
             if rankedStations.isEmpty {
-                VStack(spacing: 8) {
+                VStack(spacing: 10) {
                     Text(fuelService.isLoading ? "Loading live prices…" : "No stations found for \(selectedFuelType.rawValue) in \(selectedRegion.rawValue).")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -363,52 +355,63 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
+                .padding(.vertical, 28)
             } else {
-                VStack(spacing: 10) {
+                VStack(spacing: 14) {
                     ForEach(rankedStations) { item in
                         stationCard(item)
                     }
                 }
             }
         }
-        .padding(16)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(18)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private func stationCard(_ item: RankedFuelStation) -> some View {
         let isThisStationActive = spoofManager.activeStation?.id == item.station.id && spoofManager.isSpoofing
 
-        return HStack(spacing: 12) {
-            Text("#\(item.rank)")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(item.rank == 1 ? .white : .secondary)
-                .frame(width: 28, height: 28)
-                .background(
-                    item.rank == 1 ? Color.accentColor : Color(.tertiarySystemGroupedBackground),
-                    in: Circle()
-                )
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                Text("#\(item.rank)")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(item.rank == 1 ? .white : .secondary)
+                    .frame(width: 30, height: 30)
+                    .background(
+                        item.rank == 1 ? Color.accentColor : Color(.secondarySystemGroupedBackground),
+                        in: Circle()
+                    )
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.station.name)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Text(item.station.locationSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.station.name)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text(item.station.locationSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
 
-            Spacer()
+                Spacer(minLength: 8)
 
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
                     Text(item.station.formattedPrice)
-                        .font(.title3.weight(.bold).monospacedDigit())
+                        .font(.title2.weight(.bold).monospacedDigit())
                     Text("c/L")
-                        .font(.caption2.weight(.semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            HStack {
+                Text(selectedFuelType.rawValue)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(.secondarySystemGroupedBackground), in: Capsule())
+
+                Spacer()
 
                 Button {
                     if isThisStationActive {
@@ -417,71 +420,56 @@ struct ContentView: View {
                         spoofManager.spoof(station: item.station)
                     }
                 } label: {
-                    Text(isThisStationActive ? "Stop Spoof" : "Spoof Here")
-                        .font(.caption.weight(.semibold))
+                    Label(
+                        isThisStationActive ? "Stop Spoof" : "Spoof Here",
+                        systemImage: isThisStationActive ? "location.slash.fill" : "location.fill"
+                    )
+                    .font(.subheadline.weight(.semibold))
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(isThisStationActive ? .red : .accentColor)
-                .controlSize(.small)
+                .controlSize(.regular)
                 .disabled(spoofManager.isBusy)
             }
         }
-        .padding(12)
+        .padding(16)
         .background(
             Color(.tertiarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
     }
 
-    // MARK: - Step-by-Step Fuel Lock Guide
+    // MARK: - Picker Overlay
 
-    private var fuelLockGuideCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("How to Fuel Lock (4 Steps)", systemImage: "fuelpump.fill")
-                .font(.headline)
-
-            VStack(alignment: .leading, spacing: 10) {
-                guideStep(
-                    number: 1,
-                    title: "Run Spoof",
-                    detail: "Tap \"Spoof Here\" on a cheap station above. Background keep-alive starts automatically."
-                )
-                guideStep(
-                    number: 2,
-                    title: "Start Fuel Lock & Wait for Price",
-                    detail: "Open the 7-Eleven app, start Fuel Lock, and wait until the spoofed price appears."
-                )
-                guideStep(
-                    number: 3,
-                    title: "Turn Off Spoof",
-                    detail: "Switch back to 8/12 and tap \"Stop Spoof\" to restore your real GPS location."
-                )
-                guideStep(
-                    number: 4,
-                    title: "Return & Claim",
-                    detail: "Switch back to the 7-Eleven app and claim your locked fuel price!"
-                )
-            }
-        }
-        .padding(16)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    private func guideStep(number: Int, title: String, detail: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text("\(number)")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.white)
-                .frame(width: 24, height: 24)
-                .background(Color.accentColor, in: Circle())
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+    @ViewBuilder
+    private func pickerOverlay(for picker: ActivePicker) -> some View {
+        switch picker {
+        case .fuel:
+            PickerOverlay(
+                title: "Select Fuel Type",
+                options: FuelType.allCases,
+                selected: selectedFuelType,
+                label: { $0.rawValue },
+                onSelect: { selectedFuelTypeRaw = $0.rawValue },
+                onDismiss: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        activePicker = nil
+                    }
+                }
+            )
+        case .region:
+            PickerOverlay(
+                title: "Select State / Region",
+                options: FuelRegion.allCases,
+                selected: selectedRegion,
+                label: { $0.rawValue },
+                onSelect: { selectedRegionRaw = $0.rawValue },
+                onDismiss: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        activePicker = nil
+                    }
+                }
+            )
         }
     }
 
@@ -507,40 +495,5 @@ struct ContentView: View {
             (isError ? Color.red : Color.green).opacity(0.12),
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
-    }
-}
-
-private struct ActivityLogSheet: View {
-    let logs: [String]
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    if logs.isEmpty {
-                        Text("No activity yet.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .padding()
-                    } else {
-                        ForEach(Array(logs.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.caption.monospaced())
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                }
-                .padding()
-            }
-            .navigationTitle("Activity Log")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
     }
 }
