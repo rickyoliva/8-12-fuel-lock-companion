@@ -22,6 +22,7 @@ final class LocationSpoofManager: ObservableObject {
     @Published private(set) var pairingFileExists = false
     @Published private(set) var pairingFileKind: PairingFileKind?
     @Published private(set) var vpnConnected = false
+    @Published private(set) var localDevVPNInstalled = false
     @Published private(set) var logs: [String] = []
     @Published var errorMessage: String?
     @Published var statusMessage: String?
@@ -47,6 +48,7 @@ final class LocationSpoofManager: ObservableObject {
 
     var isSpoofing: Bool { simulatedCoordinate != nil }
     var isReadyToSpoof: Bool { pairingFileExists && vpnConnected }
+    var isLocalDevVPNDetected: Bool { localDevVPNInstalled || vpnConnected }
 
     init() {
         let savedIP = UserDefaults.standard.string(forKey: Self.deviceIPKey) ?? DeviceConnection.defaultDeviceIP
@@ -57,13 +59,23 @@ final class LocationSpoofManager: ObservableObject {
     func refreshState() {
         refreshPairingFile()
         refreshNetworkStatus()
+        refreshLocalDevVPNInstalled()
+    }
+
+    func refreshLocalDevVPNInstalled() {
+        if let url = URL(string: "localdevvpn://") {
+            localDevVPNInstalled = UIApplication.shared.canOpenURL(url)
+        } else {
+            localDevVPNInstalled = false
+        }
     }
 
     func refreshPairingFile() {
+        if PairingFileStore.migrateLegacyIfNeeded(in: Self.documentsDirectory) {
+            appendLog("Migrated legacy pairing file to \(PairingFileStore.standardFilename).")
+        }
         let path = Self.pairingFileURL.path
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let size = (attrs?[.size] as? Int) ?? 0
-        pairingFileExists = FileManager.default.fileExists(atPath: path) && size > 0
+        pairingFileExists = PairingFileStore.hasNonEmptyFile(at: Self.pairingFileURL)
         pairingFileKind = pairingFileExists ? PairingFileKind.of(path: path) : nil
     }
 
@@ -90,44 +102,38 @@ final class LocationSpoofManager: ObservableObject {
 
     // MARK: - Pairing File Import
 
-    func importPairingFile(from url: URL) {
+    func handleIncomingURL(_ url: URL) {
+        guard url.isFileURL else { return }
+        appendLog("Received pairing file via Share Sheet / Files: \(url.lastPathComponent)")
+        importPairingFile(from: url, sourceLabel: "Share Sheet / Files")
+    }
+
+    func importPairingFile(from url: URL, sourceLabel: String? = nil) {
         errorMessage = nil
         statusMessage = nil
 
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-
         do {
-            let data = try Data(contentsOf: url)
-            let kind = PairingFileKind.of(data: data)
-            guard kind.isUsable else {
-                errorMessage = "That file doesn't look like an iOS pairing file."
-                return
-            }
-
-            try FileManager.default.createDirectory(
-                at: Self.pairingFileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: Self.pairingFileURL, options: .atomic)
+            let result = try PairingFileStore.importFile(from: url, to: Self.pairingFileURL)
             connection.disconnect()
             refreshPairingFile()
 
-            if !kind.hasRemotePairing {
+            if !result.kind.hasRemotePairing {
                 errorMessage = "Imported a classic lockdown pairing file. On iOS 26.4+, use a Remote Pairing file (from idevice_pair, iLoader, or SideInstaller) for LocalDevVPN."
                 appendLog("Imported classic lockdown pairing file (missing RemotePairing keys).")
             } else {
-                statusMessage = "Pairing file imported and ready."
-                appendLog("Imported Remote Pairing file (\(url.lastPathComponent)).")
+                let via = sourceLabel.map { " via \($0)" } ?? ""
+                statusMessage = "Pairing file imported\(via) and saved to \(PairingFileStore.standardFilename)."
+                appendLog("Imported Remote Pairing file (\(result.filename))\(via).")
             }
         } catch {
-            errorMessage = "Couldn't import pairing file: \(error.localizedDescription)"
+            errorMessage = error.localizedDescription
             appendLog("Pairing import failed: \(error.localizedDescription)")
         }
     }
 
     func removePairingFile() {
         try? FileManager.default.removeItem(at: Self.pairingFileURL)
+        try? FileManager.default.removeItem(at: PairingFileStore.legacyURL(in: Self.documentsDirectory))
         connection.disconnect()
         refreshPairingFile()
         statusMessage = "Pairing file removed."
@@ -350,10 +356,21 @@ final class LocationSpoofManager: ObservableObject {
         }
     }
 
-    static var pairingFileURL: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+    func clearLogs() {
+        logs.removeAll()
+    }
+
+    var formattedLogs: String {
+        logs.joined(separator: "\n")
+    }
+
+    static var documentsDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL.documentsDirectory
-        return docs.appendingPathComponent("pairing.mobiledevicepairing")
+    }
+
+    static var pairingFileURL: URL {
+        PairingFileStore.standardURL(in: documentsDirectory)
     }
 
     private static let logFormatter: DateFormatter = {
