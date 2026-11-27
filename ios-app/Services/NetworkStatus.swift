@@ -111,11 +111,17 @@ enum NetworkStatus {
         _ value: String,
         defaultPort: UInt16 = DeviceConnection.rsdPort
     ) -> Endpoint? {
+        guard let components = parseEndpointComponents(value) else { return nil }
+        return Endpoint(host: components.host, port: components.explicitPort ?? defaultPort)
+    }
+
+    /// Parses an endpoint string into its host and an optional explicit port (`nil` when omitted).
+    static func parseEndpointComponents(_ value: String) -> (host: String, explicitPort: UInt16?)? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
         let hostAndCIDR: String
-        let port: UInt16
+        let explicitPort: UInt16?
 
         if trimmed.hasPrefix("[") {
             guard let closeBracket = trimmed.firstIndex(of: "]") else { return nil }
@@ -123,10 +129,10 @@ enum NetworkStatus {
                 .trimmingCharacters(in: .whitespaces)
             let remainder = trimmed[trimmed.index(after: closeBracket)...]
             if remainder.isEmpty {
-                port = defaultPort
+                explicitPort = nil
             } else if remainder.hasPrefix(":") {
                 guard let parsedPort = parsePort(String(remainder.dropFirst())) else { return nil }
-                port = parsedPort
+                explicitPort = parsedPort
             } else {
                 return nil
             }
@@ -134,10 +140,10 @@ enum NetworkStatus {
             hostAndCIDR = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
             let portString = String(trimmed[trimmed.index(after: colon)...])
             guard let parsedPort = parsePort(portString) else { return nil }
-            port = parsedPort
+            explicitPort = parsedPort
         } else {
             hostAndCIDR = trimmed
-            port = defaultPort
+            explicitPort = nil
         }
 
         let host: String
@@ -151,7 +157,7 @@ enum NetworkStatus {
         }
 
         guard !host.isEmpty, !host.contains(where: \.isWhitespace) else { return nil }
-        return Endpoint(host: host, port: port)
+        return (host: host, explicitPort: explicitPort)
     }
 
     private static func parsePort(_ raw: String) -> UInt16? {

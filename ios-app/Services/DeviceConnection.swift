@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import IDevice
+import PairingHostFFI
 
 /// Inspects what kind of records a pairing file carries.
 struct PairingFileKind: Equatable {
@@ -35,6 +36,33 @@ final class DeviceConnection {
 
     static let defaultDeviceIP = "10.7.0.1"
     static let rsdPort: UInt16 = 49152
+    static let cachedPortDefaultsKey = "cachedRPPairingPort"
+
+    struct ListenerProbe: Equatable {
+        enum Result: Equatable {
+            case answered
+            case refused
+            case took
+            case silent
+            case failed
+        }
+        let result: Result
+        let summary: String
+    }
+
+    struct ListenerKnock: Equatable {
+        let port: UInt16?
+        let summary: String
+    }
+
+    typealias PortProbe = (_ deviceIP: String, _ port: UInt16) -> ListenerProbe
+    typealias PortScanner = (_ deviceIP: String, _ skipping: [UInt16]) -> ListenerKnock
+    typealias TunnelDialer = (_ pairingFilePath: String, _ addr: sockaddr_in, _ hostname: String) throws -> (adapter: OpaquePointer, handshake: OpaquePointer)
+
+    private let userDefaults: UserDefaults
+    private let portProbe: PortProbe
+    private let portScanner: PortScanner
+    private let tunnelDialer: TunnelDialer?
 
     private var adapter: OpaquePointer?
     private var handshake: OpaquePointer?
@@ -43,6 +71,18 @@ final class DeviceConnection {
 
     var isConnected: Bool { adapter != nil && handshake != nil }
     var isSimulatingLocation: Bool { locationSim != nil }
+
+    init(
+        userDefaults: UserDefaults = .standard,
+        portProbe: @escaping PortProbe = DeviceConnection.probeListener,
+        portScanner: @escaping PortScanner = DeviceConnection.knockForListener,
+        tunnelDialer: TunnelDialer? = nil
+    ) {
+        self.userDefaults = userDefaults
+        self.portProbe = portProbe
+        self.portScanner = portScanner
+        self.tunnelDialer = tunnelDialer
+    }
 
     deinit {
         disconnect()
@@ -54,21 +94,71 @@ final class DeviceConnection {
         if let adapter { adapter_close(adapter); self.adapter = nil }
     }
 
+    // MARK: - RPPairing Port Probing & Discovery
+
+    static func probeListener(deviceIP: String, port: UInt16) -> ListenerProbe {
+        var summary: UnsafeMutablePointer<CChar>?
+        let code = deviceIP.withCString { ip in
+            si_probe_pairing_port(ip, port, &summary)
+        }
+        defer { si_string_free(summary) }
+        let said = summary.map { String(cString: $0) } ?? "wasn't probed (result \(code))"
+        let result: ListenerProbe.Result
+        switch code {
+        case 0: result = .answered
+        case 1: result = .refused
+        case 2: result = .took
+        case 3: result = .silent
+        default: result = .failed
+        }
+        return ListenerProbe(result: result, summary: said)
+    }
+
+    static func knockForListener(deviceIP: String, skipping tried: [UInt16]) -> ListenerKnock {
+        var port: UInt16 = 0
+        var summary: UnsafeMutablePointer<CChar>?
+        let result = tried.withUnsafeBufferPointer { ports in
+            deviceIP.withCString { ip in
+                si_find_pairing_port(ip, ports.baseAddress, ports.count, &port, &summary)
+            }
+        }
+        defer { si_string_free(summary) }
+        let said = summary.map { String(cString: $0) } ?? "no answer (result \(result))"
+        return ListenerKnock(port: result == 0 && port != 0 ? port : nil, summary: said)
+    }
+
+    func cachedPairingPort() -> UInt16? {
+        let raw = userDefaults.integer(forKey: Self.cachedPortDefaultsKey)
+        guard raw >= Int(Self.rsdPort), raw <= Int(UInt16.max) else { return nil }
+        return UInt16(raw)
+    }
+
+    private func setCachedPairingPort(_ port: UInt16) {
+        userDefaults.set(Int(port), forKey: Self.cachedPortDefaultsKey)
+    }
+
+    private func clearCachedPairingPort() {
+        userDefaults.removeObject(forKey: Self.cachedPortDefaultsKey)
+    }
+
     // MARK: - Tunnel Connection
 
     func connect(
         deviceIP: String,
         port: UInt16? = nil,
         pairingFilePath: String,
-        hostname: String = "FuelLockCompanion"
+        hostname: String = "FuelLockCompanion",
+        log: ((String) -> Void)? = nil
     ) throws {
-        let fallbackPort = port ?? Self.rsdPort
         let trimmed = deviceIP.trimmingCharacters(in: .whitespacesAndNewlines)
-        let endpoint: NetworkStatus.Endpoint
+        let host: String
+        let explicitPort: UInt16?
         if trimmed.isEmpty {
-            endpoint = NetworkStatus.Endpoint(host: Self.defaultDeviceIP, port: fallbackPort)
-        } else if let parsed = NetworkStatus.parseEndpoint(trimmed, defaultPort: fallbackPort) {
-            endpoint = parsed
+            host = Self.defaultDeviceIP
+            explicitPort = port
+        } else if let parsed = NetworkStatus.parseEndpointComponents(trimmed) {
+            host = parsed.host
+            explicitPort = port ?? parsed.explicitPort
         } else {
             throw DeviceError.message("Invalid device endpoint: \(deviceIP)")
         }
@@ -85,6 +175,97 @@ final class DeviceConnection {
             )
         }
 
+        let resolvedAddr = try Self.resolveIPv4Address(host: host, port: explicitPort ?? Self.rsdPort)
+        let resolvedIP = Self.ipv4String(from: resolvedAddr) ?? host
+        let targetPort = try resolveTargetPort(
+            host: host,
+            resolvedIP: resolvedIP,
+            explicitPort: explicitPort,
+            log: log
+        )
+
+        var addr = resolvedAddr
+        addr.sin_port = targetPort.bigEndian
+
+        let handles: (adapter: OpaquePointer, handshake: OpaquePointer)
+        if let tunnelDialer {
+            handles = try tunnelDialer(pairingFilePath, addr, hostname)
+        } else {
+            handles = try dialRemotePairing(
+                pairingFilePath: pairingFilePath,
+                addr: addr,
+                host: host,
+                port: targetPort,
+                hostname: hostname
+            )
+        }
+
+        disconnect()
+        self.adapter = handles.adapter
+        self.handshake = handles.handshake
+    }
+
+    func resolveTargetPort(
+        host: String,
+        resolvedIP: String,
+        explicitPort: UInt16?,
+        log: ((String) -> Void)? = nil
+    ) throws -> UInt16 {
+        if let explicitPort {
+            return explicitPort
+        }
+
+        let cachedPort = cachedPairingPort()
+        var initialCandidates: [UInt16] = []
+        if let cachedPort, cachedPort != Self.rsdPort {
+            initialCandidates.append(cachedPort)
+        }
+        initialCandidates.append(Self.rsdPort)
+
+        var tried: [UInt16] = []
+        for candidate in initialCandidates {
+            let probe = portProbe(resolvedIP, candidate)
+            switch probe.result {
+            case .answered:
+                setCachedPairingPort(candidate)
+                if candidate != Self.rsdPort || cachedPort != nil {
+                    log?("RPPairing listener answered on port \(candidate).")
+                }
+                return candidate
+            case .silent:
+                log?("Port \(candidate) \(probe.summary).")
+                throw DeviceError.message(
+                    "Couldn't reach \(host):\(candidate) (\(probe.summary)). Make sure LocalDevVPN is connected and Wi-Fi is on."
+                )
+            case .refused, .took, .failed:
+                log?("Port \(candidate) \(probe.summary).")
+                tried.append(candidate)
+                if candidate == cachedPort {
+                    clearCachedPairingPort()
+                }
+            }
+        }
+
+        log?("Scanning dynamic ports 49152–65535 for RPPairing listener…")
+        let knock = portScanner(resolvedIP, tried)
+        log?("Port scan: \(knock.summary).")
+        guard let discovered = knock.port else {
+            throw DeviceError.message(
+                "Couldn't find a live RPPairing listener on \(host) (\(knock.summary)). Make sure LocalDevVPN is connected, Wi-Fi is on, and Developer Mode is enabled."
+            )
+        }
+        log?("Discovered RPPairing listener on port \(discovered).")
+        setCachedPairingPort(discovered)
+        return discovered
+    }
+
+    private func dialRemotePairing(
+        pairingFilePath: String,
+        addr: sockaddr_in,
+        host: String,
+        port: UInt16,
+        hostname: String
+    ) throws -> (adapter: OpaquePointer, handshake: OpaquePointer) {
         var pf: OpaquePointer?
         try pairingFilePath.withCString { p in
             try check(rp_pairing_file_read(p, &pf), "Failed to read pairing file")
@@ -94,17 +275,16 @@ final class DeviceConnection {
         }
         defer { rp_pairing_file_free(pairingFile) }
 
-        var addr = try Self.resolveIPv4Address(host: endpoint.host, port: endpoint.port)
-
+        var mutableAddr = addr
         var newAdapter: OpaquePointer?
         var newHandshake: OpaquePointer?
-        let err = withUnsafePointer(to: &addr) { aptr in
+        let err = withUnsafePointer(to: &mutableAddr) { aptr in
             aptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                hostname.withCString { host in
+                hostname.withCString { cHost in
                     tunnel_create_rppairing(
                         sa,
                         idevice_socklen_t(MemoryLayout<sockaddr_in>.stride),
-                        host,
+                        cHost,
                         pairingFile,
                         nil,
                         nil,
@@ -116,15 +296,19 @@ final class DeviceConnection {
         }
         try check(
             err,
-            "Couldn't open tunnel to \(endpoint.host):\(endpoint.port). Make sure LocalDevVPN is connected, Wi-Fi is on, and Developer Mode is enabled."
+            "Couldn't open tunnel to \(host):\(port). Make sure LocalDevVPN is connected, Wi-Fi is on, and Developer Mode is enabled."
         )
         guard let newAdapter, let newHandshake else {
             throw DeviceError.message("Tunnel opened without valid adapter/handshake handles.")
         }
+        return (newAdapter, newHandshake)
+    }
 
-        disconnect()
-        self.adapter = newAdapter
-        self.handshake = newHandshake
+    private static func ipv4String(from addr: sockaddr_in) -> String? {
+        var sinAddr = addr.sin_addr
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &sinAddr, &buf, socklen_t(buf.count)) != nil else { return nil }
+        return String(cString: buf)
     }
 
     private static func resolveIPv4Address(host: String, port: UInt16) throws -> sockaddr_in {
